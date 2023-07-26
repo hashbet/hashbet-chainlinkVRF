@@ -199,9 +199,7 @@ contract HashBet is Ownable, ReentrancyGuard, VRFV2WrapperConsumerBase {
     }
 
     // Owner can withdraw funds not exceeding balance minus potential win prizes by open bets
-    function withdrawFunds(
-        uint withdrawAmount
-    ) external onlyOwner {
+    function withdrawFunds(uint withdrawAmount) external onlyOwner {
         require(
             withdrawAmount <= address(this).balance,
             "Withdrawal amount larger than balance."
@@ -210,7 +208,7 @@ contract HashBet is Ownable, ReentrancyGuard, VRFV2WrapperConsumerBase {
             withdrawAmount <= address(this).balance - lockedInBets,
             "Withdrawal amount larger than balance minus lockedInBets"
         );
-        address payable beneficiary =payable(msg.sender);
+        address payable beneficiary = payable(msg.sender);
         beneficiary.transfer(withdrawAmount);
         cumulativeWithdrawal += withdrawAmount;
     }
@@ -247,7 +245,7 @@ contract HashBet is Ownable, ReentrancyGuard, VRFV2WrapperConsumerBase {
 
         checkVRFFee(betAmount, tx.gasprice);
 
-        validateArguments(betAmount, betMask, modulo, isLarger);
+        validateArguments(betAmount, betMask, modulo);
 
         uint rollEdge;
         uint mask;
@@ -261,10 +259,6 @@ contract HashBet is Ownable, ReentrancyGuard, VRFV2WrapperConsumerBase {
             mask = betMask;
         } else {
             // Larger modulos games specify the right edge of half-open interval of winning bet outcomes.
-            require(
-                betMask > 0 && betMask <= modulo,
-                "High modulo range, betMask larger than modulo."
-            );
             rollEdge = betMask;
         }
 
@@ -358,8 +352,7 @@ contract HashBet is Ownable, ReentrancyGuard, VRFV2WrapperConsumerBase {
     // Common settlement code for settleBet.
     function settleBetCommon(
         Bet storage bet,
-        uint reveal,
-        bytes32 entropyBlockHash
+        uint reveal
     ) private {
         // Fetch bet parameters into local variables (to save gas).
         uint amount = bet.amount;
@@ -378,7 +371,7 @@ contract HashBet is Ownable, ReentrancyGuard, VRFV2WrapperConsumerBase {
         // are not aware of "reveal" and cannot deduce it from "commit" (as Keccak256
         // preimage is intractable), and house is unable to alter the "reveal" after
         // placeBet have been mined (as Keccak256 collision finding is also intractable).
-        bytes32 entropy = keccak256(abi.encodePacked(reveal, entropyBlockHash));
+        bytes32 entropy = keccak256(abi.encodePacked(reveal));
 
         // Do a roll by taking a modulo of entropy. Compute winning amount.
         uint outcome = uint(entropy) % modulo;
@@ -497,7 +490,10 @@ contract HashBet is Ownable, ReentrancyGuard, VRFV2WrapperConsumerBase {
      * @return VRFfee amount of fee user has to pay
      */
     function getVRFFee(uint gasPrice) public view returns (uint256 VRFfee) {
-        uint link = VRF_V2_WRAPPER.estimateRequestPrice(callbackGasLimit, gasPrice);
+        uint link = VRF_V2_WRAPPER.estimateRequestPrice(
+            callbackGasLimit,
+            gasPrice
+        );
         VRFfee = (link * uint256(getLatestData())) / 1e18;
     }
 
@@ -530,22 +526,24 @@ contract HashBet is Ownable, ReentrancyGuard, VRFV2WrapperConsumerBase {
 
         // prettier-ignore
         (
-            /*uint80 roundID*/,
-            int data,
-            /*uint startedAt*/,
-            /*uint timeStamp*/,
-            /*uint80 answeredInRound*/
+            uint80 roundID,
+            int256 price,
+            , 
+            uint256 updatedAt,
+            uint80 answeredInRound
         ) = dataFeed.latestRoundData();
+        require(answeredInRound >= roundID, "Stale price");
+        require(price > 0, "Invalid price");
+        require(block.timestamp <= updatedAt + GRACE_PERIOD_TIME, "Stale price");
 
-        return data;
+        return price;
     }
 
     // Check arguments
     function validateArguments(
         uint amount,
         uint betMask,
-        uint modulo,
-        bool isLarger
+        uint modulo
     ) private view {
         // Validate input data.
         require(
@@ -560,23 +558,19 @@ contract HashBet is Ownable, ReentrancyGuard, VRFV2WrapperConsumerBase {
             amount >= minBetAmount && amount <= maxBetAmount,
             "Bet amount should be within range."
         );
-        require(
-            betMask > 0 && betMask < MAX_BET_MASK,
-            "Mask should be within range."
-        );
 
-        if (modulo > MAX_MASK_MODULO) {
-            if (isLarger) {
-                require(
-                    betMask >= minOverValue && betMask <= modulo,
-                    "High modulo range, betMask must larger than minimum larger comparison value."
-                );
-            } else {
-                require(
-                    betMask > 0 && betMask <= maxUnderValue,
-                    "High modulo range, betMask must smaller than maximum smaller comparison value."
-                );
-            }
+        if (modulo <= MAX_MASK_MODULO) {
+            require(
+                betMask > 0 && betMask < MAX_BET_MASK,
+                "Mask should be within range."
+            );
+        }
+
+        if (modulo == MAX_MODULO) {
+            require(
+                betMask >= minOverValue && betMask <= maxUnderValue,
+                "High modulo range, Mask should be within range."
+            );
         }
     }
 
@@ -599,23 +593,24 @@ contract HashBet is Ownable, ReentrancyGuard, VRFV2WrapperConsumerBase {
         Bet storage bet = bets[betID];
         if (bet.gambler == address(0)) revert();
         uint placeBlockNumber = bet.placeBlockNumber;
+        uint betTime = betPlaceTime[betID];
+
+        // Settle bet must be within one hour
+        require(
+            block.timestamp < (betTime + 1 hours),
+            "settleBet has expired."
+        );
 
         // Check that bet has not expired yet (see comment to BET_EXPIRATION_BLOCKS).
         require(
             ChainSpecificUtil.getBlockNumber() > placeBlockNumber,
             "settleBet before placeBet"
         );
-        require(
-            ChainSpecificUtil.getBlockNumber() <=
-                placeBlockNumber + BET_EXPIRATION_BLOCKS,
-            "Blockhash can't be queried by EVM."
-        );
 
         // Settle bet using reveal and blockHash as entropy sources.
         settleBetCommon(
             bet,
-            randomWords[0],
-            ChainSpecificUtil.getBlockhash(placeBlockNumber)
+            randomWords[0]
         );
 
         delete (s_requestIDToRequestIndex[requestID]);
