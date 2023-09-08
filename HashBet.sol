@@ -529,12 +529,11 @@ contract HashBet is Ownable, ReentrancyGuard, VRFV2WrapperConsumerBase {
             uint80 roundID,
             int256 price,
             , 
-            uint256 updatedAt,
+            ,
             uint80 answeredInRound
         ) = dataFeed.latestRoundData();
         require(answeredInRound >= roundID, "Stale price");
         require(price > 0, "Invalid price");
-        require(block.timestamp <= updatedAt + GRACE_PERIOD_TIME, "Stale price");
 
         return price;
     }
